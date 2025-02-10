@@ -220,7 +220,7 @@ python ./mace/scripts/run_train.py \
     --ema_decay=0.99 \
     --amsgrad \
     --error_table='PerAtomMAE' \
-    --device=cuda \
+    --device=cpu \
     --seed=123 \
 ```
 
