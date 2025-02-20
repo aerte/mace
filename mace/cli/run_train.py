@@ -568,221 +568,213 @@ def run(args: argparse.Namespace) -> None:
     loss_fn = get_loss_fn(args, dipole_only, args.compute_dipole)
     args.avg_num_neighbors = get_avg_num_neighbors(head_configs, args, train_loader, device)
 
+
+    if not args.hpo:
+
+    ############################################################    
     # Model
-    model, output_args = configure_model(args, train_loader, atomic_energies, model_foundation, heads, z_table)
-    model.to(device)
-
-    logging.debug(model)
-    logging.info(f"Total number of parameters: {tools.count_parameters(model)}")
-    logging.info("")
-    logging.info("===========OPTIMIZER INFORMATION===========")
-    logging.info(f"Using {args.optimizer.upper()} as parameter optimizer")
-    logging.info(f"Batch size: {args.batch_size}")
-    if args.ema:
-        logging.info(f"Using Exponential Moving Average with decay: {args.ema_decay}")
-    logging.info(
-        f"Number of gradient updates: {int(args.max_num_epochs*len(train_set)/args.batch_size)}"
-    )
-    logging.info(f"Learning rate: {args.lr}, weight decay: {args.weight_decay}")
-    logging.info(loss_fn)
-
-    # Cueq
-    if args.enable_cueq:
-        logging.info("Converting model to CUEQ for accelerated training")
-        assert model.__class__.__name__ in ["MACE", "ScaleShiftMACE"]
-        model = run_e3nn_to_cueq(deepcopy(model), device=device)
-    # Optimizer
-    param_options = get_params_options(args, model)
-    optimizer: torch.optim.Optimizer
-    optimizer = get_optimizer(args, param_options)
-    if args.device == "xpu":
-        logging.info("Optimzing model and optimzier for XPU")
-        model, optimizer = ipex.optimize(model, optimizer=optimizer)
-    logger = tools.MetricsLogger(
-        directory=args.results_dir, tag=tag + "_train"
-    )  # pylint: disable=E1123
-
-    lr_scheduler = LRScheduler(optimizer, args)
-
-    swa: Optional[tools.SWAContainer] = None
-    swas = [False]
-    if args.swa:
-        swa, swas = get_swa(args, model, optimizer, swas, dipole_only)
-
-    checkpoint_handler = tools.CheckpointHandler(
-        directory=args.checkpoints_dir,
-        tag=tag,
-        keep=args.keep_checkpoints,
-        swa_start=args.start_swa,
-    )
-
-    start_epoch = 0
-    if args.restart_latest:
-        try:
-            opt_start_epoch = checkpoint_handler.load_latest(
-                state=tools.CheckpointState(model, optimizer, lr_scheduler),
-                swa=True,
-                device=device,
-            )
-        except Exception:  # pylint: disable=W0703
-            opt_start_epoch = checkpoint_handler.load_latest(
-                state=tools.CheckpointState(model, optimizer, lr_scheduler),
-                swa=False,
-                device=device,
-            )
-        if opt_start_epoch is not None:
-            start_epoch = opt_start_epoch
-
-    ema: Optional[ExponentialMovingAverage] = None
-    if args.ema:
-        ema = ExponentialMovingAverage(model.parameters(), decay=args.ema_decay)
-    else:
-        for group in optimizer.param_groups:
-            group["lr"] = args.lr
-
-    if args.wandb:
-        setup_wandb(args)
-    if args.distributed:
-        distributed_model = DDP(model, device_ids=[local_rank])
-    else:
-        distributed_model = None
-
-    tools.train(
-        model=model,
-        loss_fn=loss_fn,
-        train_loader=train_loader,
-        valid_loaders=valid_loaders,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-        checkpoint_handler=checkpoint_handler,
-        eval_interval=args.eval_interval,
-        start_epoch=start_epoch,
-        max_num_epochs=args.max_num_epochs,
-        logger=logger,
-        patience=args.patience,
-        save_all_checkpoints=args.save_all_checkpoints,
-        output_args=output_args,
-        device=device,
-        swa=swa,
-        ema=ema,
-        max_grad_norm=args.clip_grad,
-        log_errors=args.error_table,
-        log_wandb=args.wandb,
-        distributed=args.distributed,
-        distributed_model=distributed_model,
-        train_sampler=train_sampler,
-        rank=rank,
-    )
-
-    logging.info("")
-    logging.info("===========RESULTS===========")
-    logging.info("Computing metrics for training, validation, and test sets")
-
-    train_valid_data_loader = {}
-    for head_config in head_configs:
-        data_loader_name = "train_" + head_config.head_name
-        train_valid_data_loader[data_loader_name] = head_config.train_loader
-    for head, valid_loader in valid_loaders.items():
-        data_load_name = "valid_" + head
-        train_valid_data_loader[data_load_name] = valid_loader
-
-    test_sets = {}
-    stop_first_test = False
-    test_data_loader = {}
-    if all(
-        head_config.test_file == head_configs[0].test_file
-        for head_config in head_configs
-    ) and head_configs[0].test_file is not None:
-        stop_first_test = True
-    if all(
-        head_config.test_dir == head_configs[0].test_dir
-        for head_config in head_configs
-    ) and head_configs[0].test_dir is not None:
-        stop_first_test = True
-    for head_config in head_configs:
-        if check_path_ase_read(head_config.train_file):
-            for name, subset in head_config.collections.tests:
-                test_sets[name] = [
-                    data.AtomicData.from_config(
-                        config, z_table=z_table, cutoff=args.r_max, heads=heads
-                    )
-                    for config in subset
-                ]
-        if head_config.test_dir is not None:
-            if not args.multi_processed_test:
-                test_files = get_files_with_suffix(head_config.test_dir, "_test.h5")
-                for test_file in test_files:
-                    name = os.path.splitext(os.path.basename(test_file))[0]
-                    test_sets[name] = data.HDF5Dataset(
-                        test_file, r_max=args.r_max, z_table=z_table, heads=heads, head=head_config.head_name
-                    )
-            else:
-                test_folders = glob(head_config.test_dir + "/*")
-                for folder in test_folders:
-                    name = os.path.splitext(os.path.basename(test_file))[0]
-                    test_sets[name] = data.dataset_from_sharded_hdf5(
-                        folder, r_max=args.r_max, z_table=z_table, heads=heads, head=head_config.head_name
-                    )
-        for test_name, test_set in test_sets.items():
-            test_sampler = None
-            if args.distributed:
-                test_sampler = torch.utils.data.distributed.DistributedSampler(
-                    test_set,
-                    num_replicas=world_size,
-                    rank=rank,
-                    shuffle=True,
-                    drop_last=True,
-                    seed=args.seed,
-                )
-            try:
-                drop_last = test_set.drop_last
-            except AttributeError as e:  # pylint: disable=W0612
-                drop_last = False
-            test_loader = torch_geometric.dataloader.DataLoader(
-                test_set,
-                batch_size=args.valid_batch_size,
-                shuffle=(test_sampler is None),
-                drop_last=drop_last,
-                num_workers=args.num_workers,
-                pin_memory=args.pin_memory,
-            )
-            test_data_loader[test_name] = test_loader
-        if stop_first_test:
-            break
-
-    for swa_eval in swas:
-        epoch = checkpoint_handler.load_latest(
-            state=tools.CheckpointState(model, optimizer, lr_scheduler),
-            swa=swa_eval,
-            device=device,
-        )
+    ############################################################
+        model, output_args = configure_model(args, train_loader, atomic_energies, model_foundation, heads, z_table)
         model.to(device)
+
+        logging.debug(model)
+        logging.info(f"Total number of parameters: {tools.count_parameters(model)}")
+        logging.info("")
+        logging.info("===========OPTIMIZER INFORMATION===========")
+        logging.info(f"Using {args.optimizer.upper()} as parameter optimizer")
+        logging.info(f"Batch size: {args.batch_size}")
+        if args.ema:
+            logging.info(f"Using Exponential Moving Average with decay: {args.ema_decay}")
+        logging.info(
+            f"Number of gradient updates: {int(args.max_num_epochs*len(train_set)/args.batch_size)}"
+        )
+        logging.info(f"Learning rate: {args.lr}, weight decay: {args.weight_decay}")
+        logging.info(loss_fn)
+
+        # Cueq
+        if args.enable_cueq:
+            logging.info("Converting model to CUEQ for accelerated training")
+            assert model.__class__.__name__ in ["MACE", "ScaleShiftMACE"]
+            model = run_e3nn_to_cueq(deepcopy(model), device=device)
+        # Optimizer
+        param_options = get_params_options(args, model)
+        optimizer: torch.optim.Optimizer
+        optimizer = get_optimizer(args, param_options)
+        if args.device == "xpu":
+            logging.info("Optimzing model and optimzier for XPU")
+            model, optimizer = ipex.optimize(model, optimizer=optimizer)
+        logger = tools.MetricsLogger(
+            directory=args.results_dir, tag=tag + "_train"
+        )  # pylint: disable=E1123
+
+        lr_scheduler = LRScheduler(optimizer, args)
+
+        swa: Optional[tools.SWAContainer] = None
+        swas = [False]
+        if args.swa:
+            swa, swas = get_swa(args, model, optimizer, swas, dipole_only)
+
+        checkpoint_handler = tools.CheckpointHandler(
+            directory=args.checkpoints_dir,
+            tag=tag,
+            keep=args.keep_checkpoints,
+            swa_start=args.start_swa,
+        )
+
+        start_epoch = 0
+        if args.restart_latest:
+            try:
+                opt_start_epoch = checkpoint_handler.load_latest(
+                    state=tools.CheckpointState(model, optimizer, lr_scheduler),
+                    swa=True,
+                    device=device,
+                )
+            except Exception:  # pylint: disable=W0703
+                opt_start_epoch = checkpoint_handler.load_latest(
+                    state=tools.CheckpointState(model, optimizer, lr_scheduler),
+                    swa=False,
+                    device=device,
+                )
+            if opt_start_epoch is not None:
+                start_epoch = opt_start_epoch
+
+        ema: Optional[ExponentialMovingAverage] = None
+        if args.ema:
+            ema = ExponentialMovingAverage(model.parameters(), decay=args.ema_decay)
+        else:
+            for group in optimizer.param_groups:
+                group["lr"] = args.lr
+
+        if args.wandb:
+            setup_wandb(args)
         if args.distributed:
             distributed_model = DDP(model, device_ids=[local_rank])
-        model_to_evaluate = model if not args.distributed else distributed_model
-        if swa_eval:
-            logging.info(f"Loaded Stage two model from epoch {epoch} for evaluation")
         else:
-            logging.info(f"Loaded Stage one model from epoch {epoch} for evaluation")
+            distributed_model = None
 
-        for param in model.parameters():
-            param.requires_grad = False
-        table_train_valid = create_error_table(
-            table_type=args.error_table,
-            all_data_loaders=train_valid_data_loader,
-            model=model_to_evaluate,
+        tools.train(
+            model=model,
             loss_fn=loss_fn,
+            train_loader=train_loader,
+            valid_loaders=valid_loaders,
+            optimizer=optimizer,
+            lr_scheduler=lr_scheduler,
+            checkpoint_handler=checkpoint_handler,
+            eval_interval=args.eval_interval,
+            start_epoch=start_epoch,
+            max_num_epochs=args.max_num_epochs,
+            logger=logger,
+            patience=args.patience,
+            save_all_checkpoints=args.save_all_checkpoints,
             output_args=output_args,
-            log_wandb=args.wandb,
             device=device,
+            swa=swa,
+            ema=ema,
+            max_grad_norm=args.clip_grad,
+            log_errors=args.error_table,
+            log_wandb=args.wandb,
             distributed=args.distributed,
+            distributed_model=distributed_model,
+            train_sampler=train_sampler,
+            rank=rank,
         )
-        logging.info("Error-table on TRAIN and VALID:\n" + str(table_train_valid))
 
-        if test_data_loader:
-            table_test = create_error_table(
+        logging.info("")
+        logging.info("===========RESULTS===========")
+        logging.info("Computing metrics for training, validation, and test sets")
+
+        train_valid_data_loader = {}
+        for head_config in head_configs:
+            data_loader_name = "train_" + head_config.head_name
+            train_valid_data_loader[data_loader_name] = head_config.train_loader
+        for head, valid_loader in valid_loaders.items():
+            data_load_name = "valid_" + head
+            train_valid_data_loader[data_load_name] = valid_loader
+
+        test_sets = {}
+        stop_first_test = False
+        test_data_loader = {}
+        if all(
+            head_config.test_file == head_configs[0].test_file
+            for head_config in head_configs
+        ) and head_configs[0].test_file is not None:
+            stop_first_test = True
+        if all(
+            head_config.test_dir == head_configs[0].test_dir
+            for head_config in head_configs
+        ) and head_configs[0].test_dir is not None:
+            stop_first_test = True
+        for head_config in head_configs:
+            if check_path_ase_read(head_config.train_file):
+                for name, subset in head_config.collections.tests:
+                    test_sets[name] = [
+                        data.AtomicData.from_config(
+                            config, z_table=z_table, cutoff=args.r_max, heads=heads
+                        )
+                        for config in subset
+                    ]
+            if head_config.test_dir is not None:
+                if not args.multi_processed_test:
+                    test_files = get_files_with_suffix(head_config.test_dir, "_test.h5")
+                    for test_file in test_files:
+                        name = os.path.splitext(os.path.basename(test_file))[0]
+                        test_sets[name] = data.HDF5Dataset(
+                            test_file, r_max=args.r_max, z_table=z_table, heads=heads, head=head_config.head_name
+                        )
+                else:
+                    test_folders = glob(head_config.test_dir + "/*")
+                    for folder in test_folders:
+                        name = os.path.splitext(os.path.basename(test_file))[0]
+                        test_sets[name] = data.dataset_from_sharded_hdf5(
+                            folder, r_max=args.r_max, z_table=z_table, heads=heads, head=head_config.head_name
+                        )
+            for test_name, test_set in test_sets.items():
+                test_sampler = None
+                if args.distributed:
+                    test_sampler = torch.utils.data.distributed.DistributedSampler(
+                        test_set,
+                        num_replicas=world_size,
+                        rank=rank,
+                        shuffle=True,
+                        drop_last=True,
+                        seed=args.seed,
+                    )
+                try:
+                    drop_last = test_set.drop_last
+                except AttributeError as e:  # pylint: disable=W0612
+                    drop_last = False
+                test_loader = torch_geometric.dataloader.DataLoader(
+                    test_set,
+                    batch_size=args.valid_batch_size,
+                    shuffle=(test_sampler is None),
+                    drop_last=drop_last,
+                    num_workers=args.num_workers,
+                    pin_memory=args.pin_memory,
+                )
+                test_data_loader[test_name] = test_loader
+            if stop_first_test:
+                break
+
+        for swa_eval in swas:
+            epoch = checkpoint_handler.load_latest(
+                state=tools.CheckpointState(model, optimizer, lr_scheduler),
+                swa=swa_eval,
+                device=device,
+            )
+            model.to(device)
+            if args.distributed:
+                distributed_model = DDP(model, device_ids=[local_rank])
+            model_to_evaluate = model if not args.distributed else distributed_model
+            if swa_eval:
+                logging.info(f"Loaded Stage two model from epoch {epoch} for evaluation")
+            else:
+                logging.info(f"Loaded Stage one model from epoch {epoch} for evaluation")
+
+            for param in model.parameters():
+                param.requires_grad = False
+            table_train_valid = create_error_table(
                 table_type=args.error_table,
-                all_data_loaders=test_data_loader,
+                all_data_loaders=train_valid_data_loader,
                 model=model_to_evaluate,
                 loss_fn=loss_fn,
                 output_args=output_args,
@@ -790,64 +782,365 @@ def run(args: argparse.Namespace) -> None:
                 device=device,
                 distributed=args.distributed,
             )
-            logging.info("Error-table on TEST:\n" + str(table_test))
+            logging.info("Error-table on TRAIN and VALID:\n" + str(table_train_valid))
 
-        if rank == 0:
-            # Save entire model
-            if swa_eval:
-                model_path = Path(args.checkpoints_dir) / (tag + "_stagetwo.model")
-            else:
-                model_path = Path(args.checkpoints_dir) / (tag + ".model")
-            logging.info(f"Saving model to {model_path}")
-            model_to_save = deepcopy(model)
-            if args.enable_cueq:
-                print("RUNING CUEQ TO E3NN")
-                print("swa_eval", swa_eval)
-                model_to_save = run_cueq_to_e3nn(deepcopy(model), device=device)
-            if args.save_cpu:
-                model_to_save = model_to_save.to("cpu")
-            torch.save(model_to_save, model_path)
-            extra_files = {
-                "commit.txt": commit.encode("utf-8") if commit is not None else b"",
-                "config.yaml": json.dumps(
-                    convert_to_json_format(extract_config_mace_model(model))
-                ),
-            }
-            if swa_eval:
-                torch.save(
-                    model_to_save, Path(args.model_dir) / (args.name + "_stagetwo.model")
+            if test_data_loader:
+                table_test = create_error_table(
+                    table_type=args.error_table,
+                    all_data_loaders=test_data_loader,
+                    model=model_to_evaluate,
+                    loss_fn=loss_fn,
+                    output_args=output_args,
+                    log_wandb=args.wandb,
+                    device=device,
+                    distributed=args.distributed,
                 )
-                try:
-                    path_complied = Path(args.model_dir) / (
-                        args.name + "_stagetwo_compiled.model"
-                    )
-                    logging.info(f"Compiling model, saving metadata {path_complied}")
-                    model_compiled = jit.compile(deepcopy(model_to_save))
-                    torch.jit.save(
-                        model_compiled,
-                        path_complied,
-                        _extra_files=extra_files,
-                    )
-                except Exception as e:  # pylint: disable=W0703
-                    pass
-            else:
-                torch.save(model_to_save, Path(args.model_dir) / (args.name + ".model"))
-                try:
-                    path_complied = Path(args.model_dir) / (
-                        args.name + "_compiled.model"
-                    )
-                    logging.info(f"Compiling model, saving metadata to {path_complied}")
-                    model_compiled = jit.compile(deepcopy(model_to_save))
-                    torch.jit.save(
-                        model_compiled,
-                        path_complied,
-                        _extra_files=extra_files,
-                    )
-                except Exception as e:  # pylint: disable=W0703
-                    pass
+                logging.info("Error-table on TEST:\n" + str(table_test))
 
-        if args.distributed:
-            torch.distributed.barrier()
+            if rank == 0:
+                # Save entire model
+                if swa_eval:
+                    model_path = Path(args.checkpoints_dir) / (tag + "_stagetwo.model")
+                else:
+                    model_path = Path(args.checkpoints_dir) / (tag + ".model")
+                logging.info(f"Saving model to {model_path}")
+                model_to_save = deepcopy(model)
+                if args.enable_cueq:
+                    print("RUNING CUEQ TO E3NN")
+                    print("swa_eval", swa_eval)
+                    model_to_save = run_cueq_to_e3nn(deepcopy(model), device=device)
+                if args.save_cpu:
+                    model_to_save = model_to_save.to("cpu")
+                torch.save(model_to_save, model_path)
+                extra_files = {
+                    "commit.txt": commit.encode("utf-8") if commit is not None else b"",
+                    "config.yaml": json.dumps(
+                        convert_to_json_format(extract_config_mace_model(model))
+                    ),
+                }
+                if swa_eval:
+                    torch.save(
+                        model_to_save, Path(args.model_dir) / (args.name + "_stagetwo.model")
+                    )
+                    try:
+                        path_complied = Path(args.model_dir) / (
+                            args.name + "_stagetwo_compiled.model"
+                        )
+                        logging.info(f"Compiling model, saving metadata {path_complied}")
+                        model_compiled = jit.compile(deepcopy(model_to_save))
+                        torch.jit.save(
+                            model_compiled,
+                            path_complied,
+                            _extra_files=extra_files,
+                        )
+                    except Exception as e:  # pylint: disable=W0703
+                        pass
+                else:
+                    torch.save(model_to_save, Path(args.model_dir) / (args.name + ".model"))
+                    try:
+                        path_complied = Path(args.model_dir) / (
+                            args.name + "_compiled.model"
+                        )
+                        logging.info(f"Compiling model, saving metadata to {path_complied}")
+                        model_compiled = jit.compile(deepcopy(model_to_save))
+                        torch.jit.save(
+                            model_compiled,
+                            path_complied,
+                            _extra_files=extra_files,
+                        )
+                    except Exception as e:  # pylint: disable=W0703
+                        pass
+
+            if args.distributed:
+                torch.distributed.barrier()
+
+    else:
+        # TODO: Make HPO optimization
+        # HPO
+        from mace.cli.hpo_utils import configure_hpo_model
+        models, output_args_list = configure_hpo_model(args, train_loader, atomic_energies, model_foundation, heads, z_table, device)
+        for model, output_args, num_iter in zip(models, output_args_list, range(args.hpo_num_iter)):
+            # Simple loop for now
+            logger.info(f"=========RUNNING HPO {num_iter}============")
+
+            logging.debug(model)
+            if num_iter == 0:
+                logging.info(f"Total number of parameters: {tools.count_parameters(model)}")
+                logging.info("")
+                logging.info("===========OPTIMIZER INFORMATION===========")
+                logging.info(f"Using {args.optimizer.upper()} as parameter optimizer")
+                logging.info(f"Batch size: {args.batch_size}")
+                if args.ema:
+                    logging.info(f"Using Exponential Moving Average with decay: {args.ema_decay}")
+                logging.info(
+                    f"Number of gradient updates: {int(args.max_num_epochs*len(train_set)/args.batch_size)}"
+                )
+                logging.info(f"Learning rate: {args.lr}, weight decay: {args.weight_decay}")
+                logging.info(loss_fn)
+
+            # Cueq
+            if args.enable_cueq:
+                logging.info("Converting model to CUEQ for accelerated training")
+                assert model.__class__.__name__ in ["MACE", "ScaleShiftMACE"]
+                model = run_e3nn_to_cueq(deepcopy(model), device=device)
+            # Optimizer
+            param_options = get_params_options(args, model)
+            optimizer: torch.optim.Optimizer
+            optimizer = get_optimizer(args, param_options)
+            if args.device == "xpu":
+                logging.info("Optimzing model and optimzier for XPU")
+                model, optimizer = ipex.optimize(model, optimizer=optimizer)
+            logger = tools.MetricsLogger(
+                directory=args.results_dir, tag=tag + "_train"
+            )  # pylint: disable=E1123
+
+            lr_scheduler = LRScheduler(optimizer, args)
+
+            swa: Optional[tools.SWAContainer] = None
+            swas = [False]
+            if args.swa:
+                swa, swas = get_swa(args, model, optimizer, swas, dipole_only)
+
+            checkpoint_handler = tools.CheckpointHandler(
+                directory=args.checkpoints_dir,
+                tag=tag,
+                keep=args.keep_checkpoints,
+                swa_start=args.start_swa,
+            )
+
+            start_epoch = 0
+            if args.restart_latest:
+                try:
+                    opt_start_epoch = checkpoint_handler.load_latest(
+                        state=tools.CheckpointState(model, optimizer, lr_scheduler),
+                        swa=True,
+                        device=device,
+                    )
+                except Exception:  # pylint: disable=W0703
+                    opt_start_epoch = checkpoint_handler.load_latest(
+                        state=tools.CheckpointState(model, optimizer, lr_scheduler),
+                        swa=False,
+                        device=device,
+                    )
+                if opt_start_epoch is not None:
+                    start_epoch = opt_start_epoch
+
+            ema: Optional[ExponentialMovingAverage] = None
+            if args.ema:
+                ema = ExponentialMovingAverage(model.parameters(), decay=args.ema_decay)
+            else:
+                for group in optimizer.param_groups:
+                    group["lr"] = args.lr
+
+            if args.wandb:
+                setup_wandb(args)
+            if args.distributed:
+                distributed_model = DDP(model, device_ids=[local_rank])
+            else:
+                distributed_model = None
+
+            tools.train(
+                model=model,
+                loss_fn=loss_fn,
+                train_loader=train_loader,
+                valid_loaders=valid_loaders,
+                optimizer=optimizer,
+                lr_scheduler=lr_scheduler,
+                checkpoint_handler=checkpoint_handler,
+                eval_interval=args.eval_interval,
+                start_epoch=start_epoch,
+                max_num_epochs=args.max_num_epochs,
+                logger=logger,
+                patience=args.patience,
+                save_all_checkpoints=args.save_all_checkpoints,
+                output_args=output_args,
+                device=device,
+                swa=swa,
+                ema=ema,
+                max_grad_norm=args.clip_grad,
+                log_errors=args.error_table,
+                log_wandb=args.wandb,
+                distributed=args.distributed,
+                distributed_model=distributed_model,
+                train_sampler=train_sampler,
+                rank=rank,
+            )
+
+            logging.info("")
+            logging.info("===========RESULTS===========")
+            logging.info("Computing metrics for training, validation, and test sets")
+
+            train_valid_data_loader = {}
+            for head_config in head_configs:
+                data_loader_name = "train_" + head_config.head_name
+                train_valid_data_loader[data_loader_name] = head_config.train_loader
+            for head, valid_loader in valid_loaders.items():
+                data_load_name = "valid_" + head
+                train_valid_data_loader[data_load_name] = valid_loader
+
+            test_sets = {}
+            stop_first_test = False
+            test_data_loader = {}
+            if all(
+                head_config.test_file == head_configs[0].test_file
+                for head_config in head_configs
+            ) and head_configs[0].test_file is not None:
+                stop_first_test = True
+            if all(
+                head_config.test_dir == head_configs[0].test_dir
+                for head_config in head_configs
+            ) and head_configs[0].test_dir is not None:
+                stop_first_test = True
+            for head_config in head_configs:
+                if check_path_ase_read(head_config.train_file):
+                    for name, subset in head_config.collections.tests:
+                        test_sets[name] = [
+                            data.AtomicData.from_config(
+                                config, z_table=z_table, cutoff=args.r_max, heads=heads
+                            )
+                            for config in subset
+                        ]
+                if head_config.test_dir is not None:
+                    if not args.multi_processed_test:
+                        test_files = get_files_with_suffix(head_config.test_dir, "_test.h5")
+                        for test_file in test_files:
+                            name = os.path.splitext(os.path.basename(test_file))[0]
+                            test_sets[name] = data.HDF5Dataset(
+                                test_file, r_max=args.r_max, z_table=z_table, heads=heads, head=head_config.head_name
+                            )
+                    else:
+                        test_folders = glob(head_config.test_dir + "/*")
+                        for folder in test_folders:
+                            name = os.path.splitext(os.path.basename(test_file))[0]
+                            test_sets[name] = data.dataset_from_sharded_hdf5(
+                                folder, r_max=args.r_max, z_table=z_table, heads=heads, head=head_config.head_name
+                            )
+                for test_name, test_set in test_sets.items():
+                    test_sampler = None
+                    if args.distributed:
+                        test_sampler = torch.utils.data.distributed.DistributedSampler(
+                            test_set,
+                            num_replicas=world_size,
+                            rank=rank,
+                            shuffle=True,
+                            drop_last=True,
+                            seed=args.seed,
+                        )
+                    try:
+                        drop_last = test_set.drop_last
+                    except AttributeError as e:  # pylint: disable=W0612
+                        drop_last = False
+                    test_loader = torch_geometric.dataloader.DataLoader(
+                        test_set,
+                        batch_size=args.valid_batch_size,
+                        shuffle=(test_sampler is None),
+                        drop_last=drop_last,
+                        num_workers=args.num_workers,
+                        pin_memory=args.pin_memory,
+                    )
+                    test_data_loader[test_name] = test_loader
+                if stop_first_test:
+                    break
+
+            for swa_eval in swas:
+                epoch = checkpoint_handler.load_latest(
+                    state=tools.CheckpointState(model, optimizer, lr_scheduler),
+                    swa=swa_eval,
+                    device=device,
+                )
+                model.to(device)
+                if args.distributed:
+                    distributed_model = DDP(model, device_ids=[local_rank])
+                model_to_evaluate = model if not args.distributed else distributed_model
+                if swa_eval:
+                    logging.info(f"Loaded Stage two model from epoch {epoch} for evaluation")
+                else:
+                    logging.info(f"Loaded Stage one model from epoch {epoch} for evaluation")
+
+                for param in model.parameters():
+                    param.requires_grad = False
+                table_train_valid = create_error_table(
+                    table_type=args.error_table,
+                    all_data_loaders=train_valid_data_loader,
+                    model=model_to_evaluate,
+                    loss_fn=loss_fn,
+                    output_args=output_args,
+                    log_wandb=args.wandb,
+                    device=device,
+                    distributed=args.distributed,
+                )
+                logging.info("Error-table on TRAIN and VALID:\n" + str(table_train_valid))
+
+                if test_data_loader:
+                    table_test = create_error_table(
+                        table_type=args.error_table,
+                        all_data_loaders=test_data_loader,
+                        model=model_to_evaluate,
+                        loss_fn=loss_fn,
+                        output_args=output_args,
+                        log_wandb=args.wandb,
+                        device=device,
+                        distributed=args.distributed,
+                    )
+                    logging.info("Error-table on TEST:\n" + str(table_test))
+
+            if rank == 0:
+                # Save entire model
+                if swa_eval:
+                    model_path = Path(args.checkpoints_dir) / (tag + "_stagetwo.model")
+                else:
+                    model_path = Path(args.checkpoints_dir) / (tag + ".model")
+                logging.info(f"Saving model to {model_path}")
+                model_to_save = deepcopy(model)
+                if args.enable_cueq:
+                    print("RUNING CUEQ TO E3NN")
+                    print("swa_eval", swa_eval)
+                    model_to_save = run_cueq_to_e3nn(deepcopy(model), device=device)
+                if args.save_cpu:
+                    model_to_save = model_to_save.to("cpu")
+                torch.save(model_to_save, model_path)
+                extra_files = {
+                    "commit.txt": commit.encode("utf-8") if commit is not None else b"",
+                    "config.yaml": json.dumps(
+                        convert_to_json_format(extract_config_mace_model(model))
+                    ),
+                }
+                if swa_eval:
+                    torch.save(
+                        model_to_save, Path(args.model_dir) / (args.name + "_stagetwo.model")
+                    )
+                    try:
+                        path_complied = Path(args.model_dir) / (
+                            args.name + "_stagetwo_compiled.model"
+                        )
+                        logging.info(f"Compiling model, saving metadata {path_complied}")
+                        model_compiled = jit.compile(deepcopy(model_to_save))
+                        torch.jit.save(
+                            model_compiled,
+                            path_complied,
+                            _extra_files=extra_files,
+                        )
+                    except Exception as e:  # pylint: disable=W0703
+                        pass
+                else:
+                    torch.save(model_to_save, Path(args.model_dir) / (args.name + ".model"))
+                    try:
+                        path_complied = Path(args.model_dir) / (
+                            args.name + "_compiled.model"
+                        )
+                        logging.info(f"Compiling model, saving metadata to {path_complied}")
+                        model_compiled = jit.compile(deepcopy(model_to_save))
+                        torch.jit.save(
+                            model_compiled,
+                            path_complied,
+                            _extra_files=extra_files,
+                        )
+                    except Exception as e:  # pylint: disable=W0703
+                        pass
+
+            if args.distributed:
+                torch.distributed.barrier()
+
 
     logging.info("Done")
     if args.distributed:
