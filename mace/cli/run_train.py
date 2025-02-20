@@ -859,9 +859,9 @@ def run(args: argparse.Namespace) -> None:
         # HPO
         from mace.cli.hpo_utils import configure_hpo_model
         models, output_args_list = configure_hpo_model(args, train_loader, atomic_energies, model_foundation, heads, z_table, device)
-        for model, output_args, num_iter in zip(models, output_args_list, range(args.hpo_num_iter)):
+        for model, output_args, num_iter in zip(models, output_args_list, range(len(models))):
             # Simple loop for now
-            logger.info(f"=========RUNNING HPO {num_iter}============")
+            logging.info(f"=========RUNNING HPO {num_iter}============")
 
             logging.debug(model)
             if num_iter == 0:

@@ -5,7 +5,10 @@ from mace.tools.model_script_utils import configure_model
 
 def get_hpo_grid(args):
     if args.grid is not None:
-        return args.grid
+        # Convert string representation of list to actual list
+        grid_str = args.grid.strip('[]')  # Remove brackets
+        grid = [float(x.strip()) for x in grid_str.split(',')]  # Split on commas and convert to float
+        return grid
     else:
         return [2, 2.5, 3, 3.5, 4, 4.5, 5]
     

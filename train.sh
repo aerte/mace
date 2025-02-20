@@ -28,7 +28,10 @@ python mace/cli/run_train.py \
     --wandb \
     --wandb_entity="aertebjerg-felix" \
     --wandb_project="Thesis" \
-    --wandb_name="test"
+    --wandb_name="test" \
+    --hpo \
+    --hpo_type='grid' \
+    --grid='[2, 2.5, 3, 3.5, 4, 4.5, 5]'
 
 python mace/cli/run_train.py \
      --name="MACE_ethanol" \
@@ -45,7 +48,7 @@ python mace/cli/run_train.py \
     --num_interactions=2 \
     --error_table="TotalMAE" \
     --max_ell=3 \
-    --hidden_irreps='256x0e + 256x1o + 256x2e' \
+    --hidden_irreps='256x0e + 256x1o' # + 256x2e' \
     --num_cutoff_basis=5 \
     --correlation=3 \
     --r_max=6.0 \

@@ -711,6 +711,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default="",
     )
+
     parser.add_argument(
         "--wandb_log_hypers",
         help="The hyperparameters to log in Weights and Biases",
@@ -728,6 +729,25 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "energy_weight",
             "forces_weight",
         ],
+    )
+    # HPO
+    parser.add_argument(
+        "--hpo",
+        help="Run HPO",
+        action='store_true',
+        default=False,
+    )
+    parser.add_argument(
+        "--hpo_type",
+        help="Type of HPO",
+        type=str,
+        default="grid",
+    )
+    parser.add_argument(
+        "--grid",
+        help="Grid of HPO",
+        type=str,
+        default=None,
     )
     return parser
 
