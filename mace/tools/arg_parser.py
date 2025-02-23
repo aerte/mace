@@ -749,6 +749,12 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
     )
+    parser.add_argument(
+        "--hpo_trials",
+        help="Number of trials for HPO",
+        type=int,
+        default=25,
+    )
     return parser
 
 
