@@ -680,7 +680,7 @@ def get_optimizer(
     return optimizer
 
 
-def setup_wandb(args: argparse.Namespace):
+def setup_wandb(args: argparse.Namespace, BO: bool = False):
     logging.info("Using Weights and Biases for logging")
     import wandb
 
@@ -702,6 +702,10 @@ def setup_wandb(args: argparse.Namespace):
         directory=args.wandb_dir,
     )
     wandb.run.summary["params"] = args_dict_json
+    if BO:
+        wandb.run.summary["BO"] = True
+        wandb.run.summary["BO_type"] = args.hpo_type
+        wandb.run.summary["BO_trials"] = args.hpo_trials
 
 
 def get_files_with_suffix(dir_path: str, suffix: str) -> List[str]:

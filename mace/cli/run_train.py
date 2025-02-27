@@ -647,6 +647,7 @@ def run(args: argparse.Namespace) -> None:
 
         if args.wandb:
             setup_wandb(args)
+        
         if args.distributed:
             distributed_model = DDP(model, device_ids=[local_rank])
         else:
@@ -854,9 +855,15 @@ def run(args: argparse.Namespace) -> None:
             if args.distributed:
                 torch.distributed.barrier()
 
+#####################################################################################
+################################ BO HPO ###############################################
+#####################################################################################
+
     else:
         from mace.cli.hpo_utils import configure_hpo_model
         # TODO: Make HPO optimization
+
+        experiment_name = args.ax_experiment_name
 
         input_dict = {
             'train_loader': train_loader,
@@ -879,6 +886,9 @@ def run(args: argparse.Namespace) -> None:
             input_dict['local_rank'] = None
 
         if args.hpo_type == 'single_bo':
+
+            setup_wandb(args, BO=True)
+
             logging.info("============= Single BO HPO ===================")
             if args.distributed:
                 ax_client, eval_func = configure_hpo_model(args, input_dict)
@@ -889,27 +899,30 @@ def run(args: argparse.Namespace) -> None:
             ax_client.attach_trial(
                 parameters={"r_max": 3.5}
             )
-
-            # Get the parameters and run the trial 
-            baseline_parameters = ax_client.get_trial_parameters(trial_index=0)
-            ax_client.complete_trial(trial_index=0, raw_data=eval_func(baseline_parameters["r_max"],initial=True))
+            
+            if args.restart_ax:
+                ax_client.load_from_json_file(f'{experiment_name}.json')
+            else:
+                # Get the parameters and run the trial 
+                baseline_parameters = ax_client.get_trial_parameters(trial_index=0)
+                ax_client.complete_trial(trial_index=0, raw_data=eval_func(baseline_parameters["r_max"],initial=True, iteration=0, log_wandb=True))
+                ax_client.save_to_json_file(f'{experiment_name}.json')
 
             for i in range(args.hpo_trials):
+                if i != 0:
+                    ax_client.load_from_json_file(f'{experiment_name}.json')
                 parameters, trial_index = ax_client.get_next_trial()
                 # Local evaluation here can be replaced with deployment to external system.
-                ax_client.complete_trial(trial_index=trial_index, raw_data=eval_func(parameters["r_max"]))
+                ax_client.complete_trial(trial_index=trial_index, raw_data=eval_func(parameters["r_max"], iteration=i, log_wandb=True))
+                ax_client.save_to_json_file(f'{experiment_name}.json') # Save the trial to the json file
 
             # Get the best parameters
             best_parameters = ax_client.get_best_parameters()
             logging.info(f"Best parameters: {best_parameters}")
             logging.info("============= Finished BO HPO ===================")
 
-            return
 
-
-
-
-
+################################ GRID SEARCH ############################################
 
         elif args.hpo_type == 'grid':
             ##################### GRID SEARCH #####################

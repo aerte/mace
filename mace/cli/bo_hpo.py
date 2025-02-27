@@ -53,10 +53,12 @@ from mace.tools.slurm_distributed import DistributedEnvironment
 from mace.tools.tables_utils import create_error_table
 from mace.tools.utils import AtomicNumberTable
 
+import wandb
+
 import ax
 
 
-def single_param_train_eval(r_max, args, input_dict, initial=False):
+def single_param_train_eval(r_max, args, input_dict, initial=False, log_wandb=False, iteration=0):
 
     #########################################################
     # Loading the input dictionary
@@ -150,8 +152,9 @@ def single_param_train_eval(r_max, args, input_dict, initial=False):
         for group in optimizer.param_groups:
             group["lr"] = args.lr
 
-    if args.wandb:
-        setup_wandb(args)
+    # If we run BO, we don't want to log to wandb
+    #if args.wandb:
+    #    setup_wandb(args)
     if args.distributed:
         distributed_model = DDP(model, device_ids=[local_rank])
     else:
@@ -177,15 +180,14 @@ def single_param_train_eval(r_max, args, input_dict, initial=False):
         ema=ema,
         max_grad_norm=args.clip_grad,
         log_errors=args.error_table,
-        log_wandb=args.wandb,
+#        log_wandb=args.wandb,     # Let's just log to wandb if BO is false
         distributed=args.distributed,
         distributed_model=distributed_model,
         train_sampler=train_sampler,
         rank=rank,
     )
 
-    # Optimize only over the loss for now
-    valid_loss_head = 0
+    wandb_log_dict = {}
     for valid_loader_name, valid_loader in valid_loaders.items():
         valid_loss_head, eval_metrics = tools.evaluate(
             model=model,
@@ -194,11 +196,37 @@ def single_param_train_eval(r_max, args, input_dict, initial=False):
             output_args=output_args,
             device=device,
         )
-        valid_loss_head += valid_loss_head
+        if rank == 0:
+            if log_wandb:
+                wandb_log_dict[valid_loader_name] = {
+                    "iteration": iteration,
+                    "valid_loss": valid_loss_head,
+                    "valid_rmse_e_per_atom": eval_metrics[
+                        "rmse_e_per_atom"
+                    ],
+                    "valid_rmse_f": eval_metrics["rmse_f"],
+                }
+    valid_loss = (
+        valid_loss_head  # consider only the last head for the checkpoint
+    )
+
+    wandb.log(wandb_log_dict)
+
+    # Optimize only over the loss for now
+    #valid_loss_head = 0
+    #for valid_loader_name, valid_loader in valid_loaders.items():
+    #    valid_loss_head, eval_metrics = tools.evaluate(
+    #        model=model,
+    #        loss_fn=loss_fn,
+    #        data_loader=valid_loader,
+    #        output_args=output_args,
+    #        device=device,
+    #    )
+    # valid_loss_head += valid_loss_head
 
     # Average over the valid loaders (just one if there is only one head)
-    valid_loss_head /= len(valid_loaders)
+    #valid_loss_head /= len(valid_loaders)
     #metrics, aux = tools.evaluate(model, loss_fn, valid_loaders, output_args, device)
 
-    return {'loss': valid_loss_head}
+    return {'loss': valid_loss}
 

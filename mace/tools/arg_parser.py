@@ -730,7 +730,8 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "forces_weight",
         ],
     )
-    # HPO
+
+    ######### HPO #########
     parser.add_argument(
         "--hpo",
         help="Run HPO",
@@ -755,6 +756,19 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=25,
     )
+    parser.add_argument(
+        "--ax_experiment_name",
+        help="Name of the experiment for Ax",
+        type=str,
+        default="MACE_experiment",
+    )
+    parser.add_argument(
+        "--restart_ax",
+        help="Restart the HPO from the last checkpoint",
+        action="store_true",
+        default=False,
+    )
+    ######### HPO #########
     return parser
 
 
@@ -914,6 +928,7 @@ def build_preprocess_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=123,
     )
+
     return parser
 
 

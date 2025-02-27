@@ -109,6 +109,13 @@ class GaussianBasis(torch.nn.Module):
         return torch.exp(self.coeff * torch.pow(x, 2))
 
 
+"""
+Below is the Polynomial Cutoff function. The idea is to have a function specific to an atom pair such as C---O.
+So for each node, we construct a message based on the cutoff radius with the other node in the pair.
+
+TODO: Find the uses of this function, and see how it is implemented.
+"""
+
 @compile_mode("script")
 class PolynomialCutoff(torch.nn.Module):
     """Polynomial cutoff function that goes from 1 to 0 as x goes from 0 to r_max.
@@ -143,6 +150,8 @@ class PolynomialCutoff(torch.nn.Module):
 
     def __repr__(self):
         return f"{self.__class__.__name__}(p={self.p}, r_max={self.r_max})"
+    
+########################################################################
 
 
 @compile_mode("script")

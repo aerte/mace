@@ -205,6 +205,9 @@ class AtomicEnergiesBlock(torch.nn.Module):
         )
         return f"{self.__class__.__name__}(energies=[{formatted_energies}])"
 
+#########################################################################
+"""TODO: Expand this class to take in types of atoms and set the radial basis based on it"""
+#########################################################################
 
 @compile_mode("script")
 class RadialEmbeddingBlock(torch.nn.Module):
@@ -237,13 +240,27 @@ class RadialEmbeddingBlock(torch.nn.Module):
         edge_index: torch.Tensor,
         atomic_numbers: torch.Tensor,
     ):
-        cutoff = self.cutoff_fn(edge_lengths)  # [n_edges, 1]
+        ######
+        cutoff = self.cutoff_fn(edge_lengths)  # [n_edges, 1] 
+        """
+        This is the key section of the code that need to be adapted. We need to develop a function/class that can be a drop-in solution to
+        have the cutoff be determined by the input atoms. The cutoff does not have to be adaptive over the model run, rather it just needs to
+        be set like a singular cutoff radius but for all combination of atom pairs
+        
+        After the cufoff transform, the rest of the code should not need to be changed.
+        """ 
+        ####
+
         if hasattr(self, "distance_transform"):
             edge_lengths = self.distance_transform(
                 edge_lengths, node_attrs, edge_index, atomic_numbers
             )
         radial = self.bessel_fn(edge_lengths)  # [n_edges, n_basis]
         return radial * cutoff  # [n_edges, n_basis]
+    
+#########################################################################
+"""TODO: Expand this class to take in types of atoms and set the radial basis based on it"""
+#########################################################################
 
 
 @compile_mode("script")
